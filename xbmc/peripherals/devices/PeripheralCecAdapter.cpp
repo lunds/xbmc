@@ -39,7 +39,7 @@ using namespace PERIPHERALS;
 using namespace ANNOUNCEMENT;
 using namespace CEC;
 
-#define CEC_LIB_SUPPORTED_VERSION 8
+#define CEC_LIB_SUPPORTED_VERSION 1
 
 /* time in seconds to ignore standby commands from devices after the screensaver has been activated */
 #define SCREENSAVER_TIMEOUT       10
@@ -82,13 +82,13 @@ CPeripheralCecAdapter::CPeripheralCecAdapter(const PeripheralType type, const Pe
   else
     m_cecAdapter = NULL;
 
-  if (!m_cecAdapter || m_cecAdapter->GetMinVersion() > CEC_LIB_SUPPORTED_VERSION)
+  if (!m_cecAdapter || m_cecAdapter->GetMinLibVersion() > CEC_LIB_SUPPORTED_VERSION)
   {
     /* unsupported libcec version */
-    CLog::Log(LOGERROR, g_localizeStrings.Get(36013).c_str(), CEC_LIB_SUPPORTED_VERSION, m_cecAdapter ? m_cecAdapter->GetMinVersion() : -1);
+    CLog::Log(LOGERROR, g_localizeStrings.Get(36013).c_str(), CEC_LIB_SUPPORTED_VERSION, m_cecAdapter ? m_cecAdapter->GetMinLibVersion() : -1);
 
     CStdString strMessage;
-    strMessage.Format(g_localizeStrings.Get(36013).c_str(), CEC_LIB_SUPPORTED_VERSION, m_cecAdapter ? m_cecAdapter->GetMinVersion() : -1);
+    strMessage.Format(g_localizeStrings.Get(36013).c_str(), CEC_LIB_SUPPORTED_VERSION, m_cecAdapter ? m_cecAdapter->GetMinLibVersion() : -1);
     CGUIDialogKaiToast::QueueNotification(CGUIDialogKaiToast::Error, g_localizeStrings.Get(36000), strMessage);
     m_bError = true;
     if (m_cecAdapter)
@@ -97,6 +97,7 @@ CPeripheralCecAdapter::CPeripheralCecAdapter(const PeripheralType type, const Pe
   }
   else
   {
+    CLog::Log(LOGDEBUG, "%s - using libCEC v%d.%d", __FUNCTION__, m_cecAdapter->GetLibVersionMajor(), m_cecAdapter->GetLibVersionMinor());
     m_features.push_back(FEATURE_CEC);
   }
 }
@@ -237,6 +238,10 @@ void CPeripheralCecAdapter::Process(void)
   }
 
   CLog::Log(LOGDEBUG, "%s - connection to the CEC adapter opened", __FUNCTION__);
+
+  /* get the vendor id directly after connecting, because the TV might be using a non-standard CEC implementation */
+  m_cecAdapter->GetDeviceVendorId(CECDEVICE_TV);
+
   m_bIsReady = true;
   CAnnouncementManager::AddAnnouncer(this);
 
@@ -443,22 +448,57 @@ void CPeripheralCecAdapter::ProcessNextCommand(void)
           command.parameters.size == 1 &&
           command.parameters[0] == CEC_DESK_CONTROL_MODE_STOP)
       {
-        g_application.getApplicationMessenger().MediaStop();
+        CSingleLock lock(m_critSection);
+        cec_keypress key;
+        key.duration = 500;
+        key.keycode = CEC_USER_CONTROL_CODE_STOP;
+        m_buttonQueue.push(key);
       }
       break;
     case CEC_OPCODE_PLAY:
       if (command.initiator == CECDEVICE_TV &&
           command.parameters.size == 1)
       {
-        if (command.parameters[0] == CEC_PLAY_MODE_PLAY_FORWARD ||
-            command.parameters[0] == CEC_PLAY_MODE_PLAY_STILL)
-          g_application.getApplicationMessenger().MediaPause();
+        if (command.parameters[0] == CEC_PLAY_MODE_PLAY_FORWARD)
+        {
+          CSingleLock lock(m_critSection);
+          cec_keypress key;
+          key.duration = 500;
+          key.keycode = CEC_USER_CONTROL_CODE_PLAY;
+          m_buttonQueue.push(key);
+        }
+        else if (command.parameters[0] == CEC_PLAY_MODE_PLAY_STILL)
+        {
+          CSingleLock lock(m_critSection);
+          cec_keypress key;
+          key.duration = 500;
+          key.keycode = CEC_USER_CONTROL_CODE_PAUSE;
+          m_buttonQueue.push(key);
+        }
       }
       break;
     default:
       break;
     }
   }
+}
+
+bool CPeripheralCecAdapter::GetNextCecKey(cec_keypress &key)
+{
+  bool bReturn(false);
+  CSingleLock lock(m_critSection);
+  if (!m_buttonQueue.empty())
+  {
+    key = m_buttonQueue.front();
+    m_buttonQueue.pop();
+    bReturn = true;
+  }
+  else if (m_cecAdapter->GetNextKeypress(&key))
+  {
+    bReturn = true;
+  }
+
+  return bReturn;
 }
 
 bool CPeripheralCecAdapter::GetNextKey(void)
@@ -468,7 +508,7 @@ bool CPeripheralCecAdapter::GetNextKey(void)
     return false;
 
   cec_keypress key;
-  if (!m_bIsReady || !m_cecAdapter->GetNextKeypress(&key))
+  if (!m_bIsReady || !GetNextCecKey(key))
     return false;
 
   CLog::Log(LOGDEBUG, "%s - received key %2x", __FUNCTION__, key.keycode);
@@ -639,11 +679,12 @@ bool CPeripheralCecAdapter::GetNextKey(void)
   case CEC_USER_CONTROL_CODE_F5:
   case CEC_USER_CONTROL_CODE_DATA:
   case CEC_USER_CONTROL_CODE_UNKNOWN:
+  default:
     m_bHasButton = false;
     return false;
   }
 
-  if (!m_bHasButton && iButton == m_button.iButton && key.duration > 0)
+  if (!m_bHasButton && iButton == m_button.iButton && m_button.iDuration == 0 && key.duration > 0)
   {
     /* released button of the previous keypress */
     m_bHasButton = false;
