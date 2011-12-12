@@ -770,7 +770,7 @@ bool CApplication::Create()
 
   // The key mappings may already have been loaded by a peripheral
   CLog::Log(LOGINFO, "load keymapping");
-  if (!CButtonTranslator::GetInstance().Loaded() && !CButtonTranslator::GetInstance().Load())
+  if (!CButtonTranslator::GetInstance().Load())
       FatalErrorHandler(false, false, true);
 
   int iResolution = g_graphicsContext.GetVideoResolution();
@@ -986,45 +986,16 @@ bool CApplication::InitDirectoriesWin32()
   CSpecialProtocol::SetXBMCBinPath(xbmcPath);
   CSpecialProtocol::SetXBMCPath(xbmcPath);
 
-  if (m_bPlatformDirectories)
-  {
+  CStdString strWin32UserFolder = CWIN32Util::GetProfilePath();
 
-    CStdString strWin32UserFolder = CWIN32Util::GetProfilePath();
+  g_settings.m_logFolder = strWin32UserFolder;
+  CSpecialProtocol::SetHomePath(strWin32UserFolder);
+  CSpecialProtocol::SetMasterProfilePath(URIUtils::AddFileToFolder(strWin32UserFolder, "userdata"));
+  CSpecialProtocol::SetTempPath(URIUtils::AddFileToFolder(strWin32UserFolder,"cache"));
 
-    // create user/app data/XBMC
-    CStdString homePath = URIUtils::AddFileToFolder(strWin32UserFolder, "XBMC");
+  SetEnvironmentVariable("XBMC_PROFILE_USERDATA",_P("special://masterprofile/").c_str());
 
-    // move log to platform dirs
-    g_settings.m_logFolder = homePath;
-    URIUtils::AddSlashAtEnd(g_settings.m_logFolder);
-
-    // map our special drives
-    CSpecialProtocol::SetXBMCBinPath(xbmcPath);
-    CSpecialProtocol::SetXBMCPath(xbmcPath);
-    CSpecialProtocol::SetHomePath(homePath);
-    CSpecialProtocol::SetMasterProfilePath(URIUtils::AddFileToFolder(homePath, "userdata"));
-    SetEnvironmentVariable("XBMC_PROFILE_USERDATA",_P("special://masterprofile").c_str());
-
-    CSpecialProtocol::SetTempPath(URIUtils::AddFileToFolder(homePath,"cache"));
-
-    CreateUserDirs();
-
-  }
-  else
-  {
-    URIUtils::AddSlashAtEnd(xbmcPath);
-    g_settings.m_logFolder = xbmcPath;
-
-    CSpecialProtocol::SetHomePath(URIUtils::AddFileToFolder(xbmcPath, "portable_data"));
-    CSpecialProtocol::SetMasterProfilePath(URIUtils::AddFileToFolder(xbmcPath, "portable_data/userdata"));
-
-    CStdString strTempPath = URIUtils::AddFileToFolder(xbmcPath, "portable_data/temp");
-    CSpecialProtocol::SetTempPath(strTempPath);
-
-    CreateUserDirs();
-
-    SetEnvironmentVariable("XBMC_PROFILE_USERDATA",_P("special://masterprofile/").c_str());
-  }
+  CreateUserDirs();
 
   // Expand the DLL search path with our directories
   CWIN32Util::ExtendDllPath();
@@ -2621,6 +2592,26 @@ bool CApplication::OnAction(const CAction &action)
   // Check for global volume control
   if (action.GetAmount() && (action.GetID() == ACTION_VOLUME_UP || action.GetID() == ACTION_VOLUME_DOWN))
   {
+    /* try to set the volume on a connected amp */
+  #ifdef HAVE_LIBCEC
+    vector<CPeripheral *> peripherals;
+    if (g_peripherals.GetPeripheralsWithFeature(peripherals, FEATURE_CEC))
+    {
+      for (unsigned int iPeripheralPtr = 0; iPeripheralPtr < peripherals.size(); iPeripheralPtr++)
+      {
+        CPeripheralCecAdapter *cecDevice = (CPeripheralCecAdapter *) peripherals.at(iPeripheralPtr);
+        if (cecDevice && cecDevice->HasConnectedAudioSystem())
+        {
+          if (action.GetID() == ACTION_VOLUME_UP)
+            cecDevice->ScheduleVolumeUp();
+          else
+            cecDevice->ScheduleVolumeDown();
+          return true;
+        }
+      }
+    }
+  #endif
+
     if (!m_pPlayer || !m_pPlayer->IsPassthrough())
     {
       // increase or decrease the volume
@@ -3749,6 +3740,8 @@ bool CApplication::PlayFile(const CFileItem& item, bool bRestart)
         CStdString path = item.GetPath();
         if (item.IsDVD()) 
           path = item.GetVideoInfoTag()->m_strFileNameAndPath;
+        if (item.HasProperty("original_listitem_url") && URIUtils::IsPlugin(item.GetProperty("original_listitem_url").asString()))
+          path = item.GetProperty("original_listitem_url").asString();
         if(dbs.GetResumeBookMark(path, bookmark))
         {
           options.starttime = bookmark.timeInSeconds;
@@ -5058,11 +5051,49 @@ void CApplication::ShowVolumeBar(const CAction *action)
 
 bool CApplication::IsMuted() const
 {
+  /* try to set the mute setting on a connected amp */
+#ifdef HAVE_LIBCEC
+  vector<CPeripheral *> peripherals;
+  if (g_peripherals.GetPeripheralsWithFeature(peripherals, FEATURE_CEC))
+  {
+    for (unsigned int iPeripheralPtr = 0; iPeripheralPtr < peripherals.size(); iPeripheralPtr++)
+    {
+      CPeripheralCecAdapter *cecDevice = (CPeripheralCecAdapter *) peripherals.at(iPeripheralPtr);
+      if (cecDevice && cecDevice->HasConnectedAudioSystem())
+        return false;
+    }
+  }
+#endif
   return g_settings.m_bMute;
+}
+
+bool CApplication::CecMute(void)
+{
+  /* try to set the mute setting on a connected amp */
+#ifdef HAVE_LIBCEC
+  vector<CPeripheral *> peripherals;
+  if (g_peripherals.GetPeripheralsWithFeature(peripherals, FEATURE_CEC))
+  {
+    for (unsigned int iPeripheralPtr = 0; iPeripheralPtr < peripherals.size(); iPeripheralPtr++)
+    {
+      CPeripheralCecAdapter *cecDevice = (CPeripheralCecAdapter *) peripherals.at(iPeripheralPtr);
+      if (cecDevice && cecDevice->HasConnectedAudioSystem())
+      {
+        cecDevice->ScheduleMute();
+        return true;
+      }
+    }
+  }
+#endif
+
+  return false;
 }
 
 void CApplication::ToggleMute(void)
 {
+  if (CecMute())
+    return;
+
   if (g_settings.m_bMute)
     UnMute();
   else
@@ -5071,6 +5102,9 @@ void CApplication::ToggleMute(void)
 
 void CApplication::Mute()
 {
+  if (CecMute())
+    return;
+
   g_settings.m_iPreMuteVolumeLevel = GetVolume();
   SetVolume(0);
   g_settings.m_bMute = true;
@@ -5078,6 +5112,9 @@ void CApplication::Mute()
 
 void CApplication::UnMute()
 {
+  if (CecMute())
+    return;
+
   SetVolume(g_settings.m_iPreMuteVolumeLevel);
   g_settings.m_iPreMuteVolumeLevel = 0;
   g_settings.m_bMute = false;
