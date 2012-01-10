@@ -119,11 +119,14 @@ CPeripheralCecAdapter::~CPeripheralCecAdapter(void)
   m_bStop = true;
   StopThread(true);
 
-  if (m_dll && m_cecAdapter)
+  if (m_cecAdapter)
   {
     FlushLog();
     m_dll->CECDestroy(m_cecAdapter);
     m_cecAdapter = NULL;
+  }
+  if (m_dll)
+  {
     delete m_dll;
     m_dll = NULL;
   }
