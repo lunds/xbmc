@@ -134,11 +134,7 @@ DemuxPacket* CDVDDemuxPVRClient::Read()
 
   DemuxPacket* pPacket = g_PVRClients->ReadDemuxStream();
   if (!pPacket)
-  {
-    if (m_pInput)
-      m_pInput->Close();
-    return NULL;
-  }
+    return CDVDDemuxUtils::AllocateDemuxPacket(0);
 
   if (pPacket->iStreamId == DMX_SPECIALID_STREAMINFO)
   {
